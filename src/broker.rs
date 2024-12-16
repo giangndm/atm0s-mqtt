@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use atm0s_small_p2p::P2pService;
 use mqtt::{
     control::ConnectReturnCode,
-    packet::{ConnackPacket, PubackPacket, SubackPacket, UnsubackPacket},
+    packet::{ConnackPacket, PubackPacket, PublishPacket, SubackPacket, UnsubackPacket},
 };
 use tokio::{net::TcpListener, select};
 
@@ -22,6 +22,10 @@ impl MqttBroker {
         log::info!("[MqttBroker] listening on {}", listen);
         let hub = hub::Hub::new(hub_service, kv_service);
         Ok(MqttBroker { tcp_listener, hub })
+    }
+
+    pub async fn publish(&mut self, pkt: PublishPacket) -> Result<(), hub::HubPublishError> {
+        self.hub.publish(pkt).await
     }
 
     pub async fn recv(&mut self) -> Result<(), std::io::Error> {

@@ -14,3 +14,5 @@ futures = "0.3.31"
 rustls = { version = "0.23", features = ["ring", "std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "std"] }
 atm0s-small-p2p = { git = "https://github.com/8xFF/atm0s-small-p2p.git", branch = "feat-replicated-alias" }
+poem = "3.1"
+poem-openapi = { version = "5.1", features = ["swagger-ui"] }

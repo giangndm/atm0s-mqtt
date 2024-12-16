@@ -16,6 +16,11 @@ use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
 };
 
+#[derive(Debug)]
+pub enum HubPublishError {
+    NoSubscribers,
+}
+
 pub struct Hub {
     hub_service: P2pService,
     replicated_kv_service: ReplicatedKvService<String, bool>,
@@ -50,6 +55,33 @@ impl Hub {
         Leg::new(leg_id, self.control_tx.clone(), event_rx)
     }
 
+    pub async fn publish(&mut self, pkt: PublishPacket) -> Result<(), HubPublishError> {
+        //TODO save retain message
+        let mut has_subscribers = false;
+        let topic_str: &str = pkt.topic_name();
+        for leg_id in self.local_registry.get(topic_str).into_iter().flatten() {
+            has_subscribers = true;
+            log::info!("[Hub] publish {topic_str} to local leg {leg_id:?}");
+            let event_tx = self.legs.get(&leg_id).expect("should have leg with leg_id");
+            let _ = event_tx.send(LegOutput::Publish(pkt.clone()));
+        }
+        let dests = self.remote_registry.get(topic_str).into_iter().flatten().cloned().collect::<Vec<_>>();
+        if !dests.is_empty() {
+            has_subscribers = true;
+            let mut buf = Vec::new();
+            pkt.encode(&mut buf).expect("should encode packet");
+            let requester = self.hub_service.requester();
+            let topic_str = topic_str.to_owned();
+            tokio::spawn(async move {
+                for dest_peer in dests {
+                    log::info!("[Hub] publish {topic_str} to remote node {dest_peer:?}");
+                    let _ = requester.send_unicast(dest_peer, buf.clone()).await;
+                }
+            });
+        }
+        has_subscribers.then_some(()).ok_or(HubPublishError::NoSubscribers)
+    }
+
     pub async fn recv(&mut self) -> Option<()> {
         select! {
             event = self.control_rx.recv() => {
@@ -80,26 +112,7 @@ impl Hub {
                         Some(())
                     },
                     LegControl::Publish(pkt) => {
-                        let topic_str: &str = pkt.topic_name();
-                        for leg_id in self.local_registry.get(topic_str).into_iter().flatten() {
-                            log::info!("[Hub] publish {topic_str} to local leg {leg_id:?}");
-                            let event_tx = self.legs.get(&leg_id).expect("should have leg with leg_id");
-                            let _ = event_tx.send(LegOutput::Publish(pkt.clone()));
-                        }
-
-                        let mut buf = Vec::new();
-                        pkt.encode(&mut buf).expect("should encode packet");
-
-                        let dests = self.remote_registry.get(topic_str).into_iter().flatten().cloned().collect::<Vec<_>>();
-                        let requester = self.hub_service.requester();
-                        let topic_str = topic_str.to_owned();
-                        tokio::spawn(async move {
-                            for dest_peer in dests {
-                                log::info!("[Hub] publish {topic_str} to remote node {dest_peer:?}");
-                                let _ = requester.send_unicast(dest_peer, buf.clone()).await;
-                            }
-                        });
-
+                        let _ = self.publish(pkt).await;
                         Some(())
                     },
                 }

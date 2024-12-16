@@ -1,8 +1,9 @@
 use std::{net::SocketAddr, str::FromStr};
 
-use atm0s_mqtt::MqttBroker;
+use atm0s_mqtt::{run_http, HttpCommand, MqttBroker};
 use atm0s_small_p2p::{P2pNetwork, P2pNetworkConfig, PeerAddress, SharedKeyHandshake};
 use clap::Parser;
+use mqtt::packet::{PublishPacket, QoSWithPacketIdentifier};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio::select;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -22,7 +23,7 @@ struct Args {
 
     /// UDP/TCP port for serving QUIC/TCP connection for SDN network
     #[arg(env, long, default_value = "0.0.0.0:11111")]
-    sdn_listener: SocketAddr,
+    sdn_listen: SocketAddr,
 
     /// Seeds
     #[arg(env, long, value_delimiter = ',')]
@@ -41,6 +42,10 @@ struct Args {
     /// Mqtt tcp listen
     #[arg(env, long, default_value = "0.0.0.0:1883")]
     mqtt_listen: SocketAddr,
+
+    /// Http listen
+    #[arg(env, long, default_value = "0.0.0.0:8080")]
+    http_listen: SocketAddr,
 }
 
 #[tokio::main]
@@ -60,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut p2p = P2pNetwork::new(P2pNetworkConfig {
         peer_id: args.sdn_peer_id.into(),
-        listen_addr: args.sdn_listener,
+        listen_addr: args.sdn_listen,
         advertise: args.sdn_advertise_address.map(|a| a.into()),
         priv_key,
         cert,
@@ -75,11 +80,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kv_service = p2p.create_service(KV_SERVICE.into());
 
     let mut mqtt_broker = MqttBroker::new(args.mqtt_listen, hub_service, kv_service).await?;
+    let mut http_cmd_rx = run_http(args.http_listen);
+
+    let mut pkt_id: u16 = 0;
 
     loop {
         select! {
             _ = p2p.recv() => {}
             _ = mqtt_broker.recv() => {}
+            cmd = http_cmd_rx.recv() => match cmd.expect("should have command") {
+                HttpCommand::Publish { topic, payload, qos, retain, tx } => {
+                    let mut packet = PublishPacket::new(topic, QoSWithPacketIdentifier::new(qos, pkt_id), payload);
+                    packet.set_retain(retain);
+                    pkt_id += 1;
+                    let res = mqtt_broker.publish(packet).await;
+                    let _ = tx.send(res);
+                },
+            }
         }
     }
 }
